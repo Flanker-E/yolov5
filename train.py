@@ -34,6 +34,7 @@ ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 import val  # for end-of-epoch mAP
 from models.experimental import attempt_load
 from models.yolo import Model
+from models.common import Bottleneck
 from utils.autoanchor import check_anchors
 from utils.autobatch import check_train_batch_size
 from utils.callbacks import Callbacks
@@ -49,6 +50,10 @@ from utils.loss import ComputeLoss
 from utils.metrics import fitness
 from utils.plots import plot_evolve, plot_labels
 from utils.torch_utils import EarlyStopping, ModelEMA, de_parallel, select_device, torch_distributed_zero_first
+
+from utils.modelscfg import Darknet
+from utils.model_transfer import copy_weight_v6
+from utils.prune_utils import *
 
 LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable/elastic/run.html
 RANK = int(os.getenv('RANK', -1))
@@ -134,6 +139,25 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     # Image size
     gs = max(int(model.stride.max()), 32)  # grid size (max stride)
     imgsz = check_img_size(opt.imgsz, gs, floor=gs * 2)  # verify imgsz is gs-multiple
+
+    # cfg_model = Darknet(opt.cfg_model, (imgsz, imgsz), arc=opt.arc).to(device)
+    # print(cfg_model)
+    # print(model)
+    # copy_weight_v6(model,cfg_model)
+    # print(model)
+    # if opt.prune==1:
+    #     CBL_idx, _, prune_idx, shortcut_idx, _=parse_module_defs2(model.module_defs)
+    #     if opt.sr:
+    #         print('shortcut sparse training')
+    # elif opt.prune==0:
+    #     CBL_idx, _, prune_idx= parse_module_defs(model.module_defs)
+    #     if opt.sr:
+    #         print('normal sparse training ')
+
+    # copy_module_defs=deepcopy(model.module_defs)
+    cfg_name = opt.cfg_model.replace('.', f'_{opt.name}.')
+    cfg_file = write_cfg(cfg_name, [model.hyperparams.copy()] + copy_module_defs)
+    print(f'Config file has been saved: {cfg_file}')
 
     # Batch size
     if RANK == -1 and batch_size == -1:  # single-GPU only, estimate best batch size
@@ -244,6 +268,10 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     if cuda and RANK != -1:
         model = DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK)
 
+    # for idx in prune_idx:
+    #     bn_weights = gather_bn_weights(model.module_list, [idx])
+    #     loggers.tb.add_histogram('before_train_perlayer_bn_weights/hist', bn_weights.numpy(), idx, bins='doane')
+        
     # Model attributes
     nl = de_parallel(model).model[-1].nl  # number of detection layers (to scale hyps)
     hyp['box'] *= 3 / nl  # scale to layers
@@ -290,6 +318,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         LOGGER.info(('\n' + '%10s' * 7) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'labels', 'img_size'))
         if RANK in [-1, 0]:
             pbar = tqdm(pbar, total=nb, bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}')  # progress bar
+        # sr_flag = get_sr_flag(epoch, opt.sr)
         optimizer.zero_grad()
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
@@ -325,6 +354,26 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
             # Backward
             scaler.scale(loss).backward()
+            # # ============================= sparsity training ========================== #
+            srtmp = opt.sr*(1 - 0.9*epoch/epochs)
+            if opt.st:
+                ignore_bn_list = []
+                for k, m in model.named_modules():
+                    if isinstance(m, Bottleneck):
+                        if m.add:
+                            ignore_bn_list.append(k.rsplit(".", 2)[0] + ".cv1.bn")
+                            ignore_bn_list.append(k + '.cv1.bn')
+                            ignore_bn_list.append(k + '.cv2.bn')
+                    if isinstance(m, nn.BatchNorm2d) and (k not in ignore_bn_list):
+                        m.weight.grad.data.add_(srtmp * torch.sign(m.weight.data))  # L1
+                        m.bias.grad.data.add_(opt.sr*10 * torch.sign(m.bias.data))  # L1
+            # # ============================= sparsity training ========================== #
+
+            # idx2mask = None
+            # # if opt.sr and opt.prune==1 and epoch > opt.epochs * 0.5:
+            # #     idx2mask = get_mask2(model, prune_idx, 0.85)
+
+            # BNOptimizer.updateBN(sr_flag, model.module_list, opt.s, prune_idx, epoch, idx2mask, opt)
 
             # Optimize
             if ni - last_opt_step >= accumulate:
@@ -364,6 +413,9 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                                            plots=False,
                                            callbacks=callbacks,
                                            compute_loss=compute_loss)
+
+            bn_weights = gather_bn_weights(model.module_list, prune_idx)
+            loggers.tb.add_histogram('bn_weights/hist', bn_weights.numpy(), epoch, bins='doane')
 
             # Update best mAP
             fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
@@ -407,6 +459,9 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         #    break  # must break all DDP ranks
 
         # end epoch ----------------------------------------------------------------------------------------------------
+    for idx in prune_idx:
+        bn_weights = gather_bn_weights(model.module_list, [idx])
+        loggers.tb.add_histogram('after_train_perlayer_bn_weights/hist', bn_weights.numpy(), idx, bins='doane')
     # end training -----------------------------------------------------------------------------------------------------
     if RANK in [-1, 0]:
         LOGGER.info(f'\n{epoch - start_epoch + 1} epochs completed in {(time.time() - t0) / 3600:.3f} hours.')
@@ -472,6 +527,11 @@ def parse_opt(known=False):
     parser.add_argument('--freeze', type=int, default=0, help='Number of layers to freeze. backbone=10, all=24')
     parser.add_argument('--save-period', type=int, default=-1, help='Save checkpoint every x epochs (disabled if < 1)')
     parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
+
+    # parser.add_argument('--cfg-model', type=str, default='models/yolov5s_v6.cfg', help='model cfg')
+    parser.add_argument('--sparsity-regularization', '--sr', dest='sr', action='store_true', help='train with channel sparsity regularization')
+    parser.add_argument('--scale', '-s', type=float, default=0.001, help='scale sparse rate')
+    parser.add_argument('--prune', type=int, default=1, help='0:nomal prune 1:other prune ')
 
     # Weights & Biases arguments
     parser.add_argument('--entity', default=None, help='W&B: Entity')
