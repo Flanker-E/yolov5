@@ -272,6 +272,18 @@ class Concat(nn.Module):
 
     def forward(self, x):
         return torch.cat(x, self.d)
+        
+class NMS(nn.Module):
+    # Non-Maximum Suppression (NMS) module
+    conf = 0.25  # confidence threshold
+    iou = 0.45  # IoU threshold
+    classes = None  # (optional list) filter by class
+
+    def __init__(self):
+        super(NMS, self).__init__()
+
+    def forward(self, x):
+        return non_max_suppression(x[0], conf_thres=self.conf, iou_thres=self.iou, classes=self.classes)
 
 
 class DetectMultiBackend(nn.Module):
