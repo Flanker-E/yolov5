@@ -120,6 +120,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             weights = attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location=device)  # load checkpoint
         model = ckpt["model"].to(device)
+        print(model)
         # model = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
         # exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []  # exclude keys
         # csd = ckpt['model'].float().state_dict()  # checkpoint state_dict as FP32
@@ -359,15 +360,19 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             srtmp = opt.sr*(1 - 0.9*epoch/epochs)
             if opt.st:
                 ignore_bn_list = []
+                # test=0
                 for k, m in model.named_modules():
                     if isinstance(m, Bottleneck):
                         if m.add:
+                            print("miss : ", k)
                             ignore_bn_list.append(k.rsplit(".", 2)[0] + ".cv1.bn")
                             ignore_bn_list.append(k + '.cv1.bn')
                             ignore_bn_list.append(k + '.cv2.bn')
                     if isinstance(m, nn.BatchNorm2d) and (k not in ignore_bn_list):
+                        # test=test+1
                         m.weight.grad.data.add_(srtmp * torch.sign(m.weight.data))  # L1
                         m.bias.grad.data.add_(opt.sr*10 * torch.sign(m.bias.data))  # L1
+                # print("test:",test)
             # # ============================= sparsity training ========================== #
 
             # idx2mask = None

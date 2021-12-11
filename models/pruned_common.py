@@ -3,6 +3,7 @@
 import math
 from copy import copy
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -61,5 +62,21 @@ class SPPPruned(nn.Module):
     def forward(self, x):
         x = self.cv1(x)
         return self.cv2(torch.cat([x] + [m(x) for m in self.m], 1))
+
+class SPPFPruned(nn.Module):
+    # Spatial pyramid pooling layer used in YOLOv3-SPP
+    def __init__(self, cv1in, cv1out, cv2out, k=5):
+        super(SPPFPruned, self).__init__()
+        self.cv1 = Conv(cv1in, cv1out, 1, 1)
+        self.cv2 = Conv(cv1out * 4, cv2out, 1, 1)
+        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+
+    def forward(self, x):
+        x = self.cv1(x)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')  # suppress torch 1.9.0 max_pool2d() warning
+            y1 = self.m(x)
+            y2 = self.m(y1)
+            return self.cv2(torch.cat([x, y1, y2, self.m(y2)], 1))
 
 

@@ -481,7 +481,8 @@ def parse_pruned_model(maskbndict, d, ch):  # model_dict, input_channels(3)
             c1, c2 = ch[f], bnc
             args = [c1, c2, *args[1:]]
             layertmp = named_m_bn
-            from_to_map[layertmp] = fromlayer[f]
+            if fromlayer:
+                from_to_map[layertmp] = fromlayer[f]
             fromlayer.append(named_m_bn)
 
         elif m in [Focus]:
@@ -536,6 +537,17 @@ def parse_pruned_model(maskbndict, d, ch):  # model_dict, input_channels(3)
             cv1out = int(maskbndict[named_m_cv1_bn].sum())
             cv2out = int(maskbndict[named_m_cv2_bn].sum())
             args = [cv1in, cv1out, cv2out, *args[1:]]
+            c2 = cv2out
+        elif m in [SPPFPruned]:
+            named_m_cv1_bn = named_m_base + ".cv1.bn"
+            named_m_cv2_bn = named_m_base + ".cv2.bn"
+            cv1in = ch[f]
+            from_to_map[named_m_cv1_bn] = fromlayer[f]
+            from_to_map[named_m_cv2_bn] = [named_m_cv1_bn]*4
+            fromlayer.append(named_m_cv2_bn)
+            cv1out = int(maskbndict[named_m_cv1_bn].sum())
+            cv2out = int(maskbndict[named_m_cv2_bn].sum())
+            args = [cv1in, cv1out, cv2out, args[1]]
             c2 = cv2out
 
         elif m is nn.BatchNorm2d:
