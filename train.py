@@ -156,9 +156,9 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     #         print('normal sparse training ')
 
     # copy_module_defs=deepcopy(model.module_defs)
-    cfg_name = opt.cfg_model.replace('.', f'_{opt.name}.')
-    cfg_file = write_cfg(cfg_name, [model.hyperparams.copy()] + copy_module_defs)
-    print(f'Config file has been saved: {cfg_file}')
+    # cfg_name = opt.cfg_model.replace('.', f'_{opt.name}.')
+    # cfg_file = write_cfg(cfg_name, [model.hyperparams.copy()] + copy_module_defs)
+    # print(f'Config file has been saved: {cfg_file}')
 
     # Batch size
     if RANK == -1 and batch_size == -1:  # single-GPU only, estimate best batch size
@@ -202,26 +202,26 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
     # Resume
     start_epoch, best_fitness = 0, 0.0
-    if pretrained:
-        # Optimizer
-        if ckpt['optimizer'] is not None:
-            optimizer.load_state_dict(ckpt['optimizer'])
-            best_fitness = ckpt['best_fitness']
+    # if pretrained:
+    #     # Optimizer
+    #     if ckpt['optimizer'] is not None:
+    #         optimizer.load_state_dict(ckpt['optimizer'])
+    #         best_fitness = ckpt['best_fitness']
 
-        # EMA
-        if ema and ckpt.get('ema'):
-            ema.ema.load_state_dict(ckpt['ema'].float().state_dict())
-            ema.updates = ckpt['updates']
+    #     # EMA
+    #     if ema and ckpt.get('ema'):
+    #         ema.ema.load_state_dict(ckpt['ema'].float().state_dict())
+    #         ema.updates = ckpt['updates']
 
-        # Epochs
-        start_epoch = ckpt['epoch'] + 1
-        if resume:
-            assert start_epoch > 0, f'{weights} training to {epochs} epochs is finished, nothing to resume.'
-        if epochs < start_epoch:
-            LOGGER.info(f"{weights} has been trained for {ckpt['epoch']} epochs. Fine-tuning for {epochs} more epochs.")
-            epochs += ckpt['epoch']  # finetune additional epochs
+    #     # Epochs
+    #     start_epoch = ckpt['epoch'] + 1
+    #     if resume:
+    #         assert start_epoch > 0, f'{weights} training to {epochs} epochs is finished, nothing to resume.'
+    #     if epochs < start_epoch:
+    #         LOGGER.info(f"{weights} has been trained for {ckpt['epoch']} epochs. Fine-tuning for {epochs} more epochs.")
+    #         epochs += ckpt['epoch']  # finetune additional epochs
 
-        del ckpt, csd
+    #     del ckpt, csd
 
     # DP mode
     if cuda and RANK == -1 and torch.cuda.device_count() > 1:
@@ -415,8 +415,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                                            callbacks=callbacks,
                                            compute_loss=compute_loss)
 
-            bn_weights = gather_bn_weights(model.module_list, prune_idx)
-            loggers.tb.add_histogram('bn_weights/hist', bn_weights.numpy(), epoch, bins='doane')
+            # bn_weights = gather_bn_weights(model.module_list, prune_idx)
+            # loggers.tb.add_histogram('bn_weights/hist', bn_weights.numpy(), epoch, bins='doane')
 
             # Update best mAP
             fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
@@ -460,9 +460,35 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         #    break  # must break all DDP ranks
 
         # end epoch ----------------------------------------------------------------------------------------------------
-    for idx in prune_idx:
-        bn_weights = gather_bn_weights(model.module_list, [idx])
-        loggers.tb.add_histogram('after_train_perlayer_bn_weights/hist', bn_weights.numpy(), idx, bins='doane')
+                # =============== show bn weights ===================== #
+        if opt.st:
+            module_list = []
+            module_bias_list = []
+            for i, layer in model.named_modules():
+                if isinstance(layer, nn.BatchNorm2d) and i not in ignore_bn_list:
+                    bnw = layer.state_dict()['weight']
+                    bnb = layer.state_dict()['bias']
+                    module_list.append(bnw)
+                    module_bias_list.append(bnb)
+                    # bnw = bnw.sort()
+                    # print(f"{i} : {bnw} : ")
+        size_list = [idx.data.shape[0] for idx in module_list]
+
+        bn_weights = torch.zeros(sum(size_list))
+        bnb_weights = torch.zeros(sum(size_list))
+        index = 0
+        for idx, size in enumerate(size_list):
+            bn_weights[index:(index + size)] = module_list[idx].data.abs().clone()
+            bnb_weights[index:(index + size)] = module_bias_list[idx].data.abs().clone()
+            index += size
+
+        print("bn_weights:", torch.sort(bn_weights))
+        print("bn_bias:", torch.sort(bnb_weights))
+        loggers.tb.add_histogram('bn_weights/hist', bn_weights.numpy(), epoch, bins='doane')
+        loggers.tb.add_histogram('bn_bias/hist', bnb_weights.numpy(), epoch, bins='doane')
+        # for idx in prune_idx:
+        #     bn_weights = gather_bn_weights(model.module_list, [idx])
+        #     loggers.tb.add_histogram('after_train_perlayer_bn_weights/hist', bn_weights.numpy(), idx, bins='doane')
     # end training -----------------------------------------------------------------------------------------------------
     if RANK in [-1, 0]:
         LOGGER.info(f'\n{epoch - start_epoch + 1} epochs completed in {(time.time() - t0) / 3600:.3f} hours.')
@@ -530,8 +556,9 @@ def parse_opt(known=False):
     parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
 
     # parser.add_argument('--cfg-model', type=str, default='models/yolov5s_v6.cfg', help='model cfg')
-    parser.add_argument('--sparsity-regularization', '--sr', dest='sr', action='store_true', help='train with channel sparsity regularization')
-    parser.add_argument('--scale', '-s', type=float, default=0.001, help='scale sparse rate')
+    parser.add_argument('--sr', '--sparsity-regularization', type=float, default=0.001, help='train with channel sparsity regularization')
+    parser.add_argument('--st', action='store_true',default=False, help='train with L1 sparsity normalization')
+    # parser.add_argument('--scale', '-s', type=float, default=0.001, help='scale sparse rate')
     parser.add_argument('--prune', type=int, default=1, help='0:nomal prune 1:other prune ')
 
     # Weights & Biases arguments
