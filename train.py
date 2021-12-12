@@ -262,7 +262,10 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             # Anchors
             if not opt.noautoanchor:
                 check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
-            model.half().float()  # pre-reduce anchor precision
+            if opt.half:
+                model.half().float()  #using half precision
+            else:
+                model.float()  # pre-reduce anchor precision
 
         callbacks.run('on_pretrain_routine_end')
 
@@ -357,8 +360,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             # Backward
             scaler.scale(loss).backward()
             # # ============================= sparsity training ========================== #
-            srtmp = opt.sr*(1 - 0.9*epoch/epochs)
             if opt.st:
+                srtmp = opt.sr*(1 - 0.9*epoch/epochs)
                 ignore_bn_list = []
                 # test=0
                 for k, m in model.named_modules():
@@ -432,7 +435,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
             # Save model
             if (not nosave) or (final_epoch and not evolve):  # if save
-                ckpt = {'epoch': epoch,
+                if opt.half:
+                    ckpt = {'epoch': epoch,
                         'best_fitness': best_fitness,
                         'model': deepcopy(de_parallel(model)).half(),
                         'ema': deepcopy(ema.ema).half(),
@@ -440,6 +444,16 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                         'optimizer': optimizer.state_dict(),
                         'wandb_id': loggers.wandb.wandb_run.id if loggers.wandb else None,
                         'date': datetime.now().isoformat()}
+                else:
+                    ckpt = {'epoch': epoch,
+                        'best_fitness': best_fitness,
+                        'model': deepcopy(de_parallel(model)),
+                        'ema': deepcopy(ema.ema),
+                        'updates': ema.updates,
+                        'optimizer': optimizer.state_dict(),
+                        'wandb_id': loggers.wandb.wandb_run.id if loggers.wandb else None,
+                        'date': datetime.now().isoformat()}
+                
 
                 # Save last, best and delete
                 torch.save(ckpt, last)
@@ -477,20 +491,20 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                     module_bias_list.append(bnb)
                     # bnw = bnw.sort()
                     # print(f"{i} : {bnw} : ")
-        size_list = [idx.data.shape[0] for idx in module_list]
+            size_list = [idx.data.shape[0] for idx in module_list]
 
-        bn_weights = torch.zeros(sum(size_list))
-        bnb_weights = torch.zeros(sum(size_list))
-        index = 0
-        for idx, size in enumerate(size_list):
-            bn_weights[index:(index + size)] = module_list[idx].data.abs().clone()
-            bnb_weights[index:(index + size)] = module_bias_list[idx].data.abs().clone()
-            index += size
+            bn_weights = torch.zeros(sum(size_list))
+            bnb_weights = torch.zeros(sum(size_list))
+            index = 0
+            for idx, size in enumerate(size_list):
+                bn_weights[index:(index + size)] = module_list[idx].data.abs().clone()
+                bnb_weights[index:(index + size)] = module_bias_list[idx].data.abs().clone()
+                index += size
 
-        print("bn_weights:", torch.sort(bn_weights))
-        print("bn_bias:", torch.sort(bnb_weights))
-        loggers.tb.add_histogram('bn_weights/hist', bn_weights.numpy(), epoch, bins='doane')
-        loggers.tb.add_histogram('bn_bias/hist', bnb_weights.numpy(), epoch, bins='doane')
+            print("bn_weights:", torch.sort(bn_weights))
+            print("bn_bias:", torch.sort(bnb_weights))
+            loggers.tb.add_histogram('bn_weights/hist', bn_weights.numpy(), epoch, bins='doane')
+            loggers.tb.add_histogram('bn_bias/hist', bnb_weights.numpy(), epoch, bins='doane')
         # for idx in prune_idx:
         #     bn_weights = gather_bn_weights(model.module_list, [idx])
         #     loggers.tb.add_histogram('after_train_perlayer_bn_weights/hist', bn_weights.numpy(), idx, bins='doane')
@@ -502,10 +516,25 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 strip_optimizer(f)  # strip optimizers
                 if f is best:
                     LOGGER.info(f'\nValidating {f}...')
-                    results, _, _ = val.run(data_dict,
+                    if opt.half:
+                        results, _, _ = val.run(data_dict,
                                             batch_size=batch_size // WORLD_SIZE * 2,
                                             imgsz=imgsz,
                                             model=attempt_load(f, device).half(),
+                                            iou_thres=0.65 if is_coco else 0.60,  # best pycocotools results at 0.65
+                                            single_cls=single_cls,
+                                            dataloader=val_loader,
+                                            save_dir=save_dir,
+                                            save_json=is_coco,
+                                            verbose=True,
+                                            plots=True,
+                                            callbacks=callbacks,
+                                            compute_loss=compute_loss)  # val best model with plots
+                    else:
+                        results, _, _ = val.run(data_dict,
+                                            batch_size=batch_size // WORLD_SIZE * 2,
+                                            imgsz=imgsz,
+                                            model=attempt_load(f, device),
                                             iou_thres=0.65 if is_coco else 0.60,  # best pycocotools results at 0.65
                                             single_cls=single_cls,
                                             dataloader=val_loader,
@@ -561,6 +590,7 @@ def parse_opt(known=False):
     parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
 
     # parser.add_argument('--cfg-model', type=str, default='models/yolov5s_v6.cfg', help='model cfg')
+    parser.add_argument('--half', action='store_true',default=False, help='Using half float')
     parser.add_argument('--sr', '--sparsity-regularization', type=float, default=0.001, help='train with channel sparsity regularization')
     parser.add_argument('--st', action='store_true',default=False, help='train with L1 sparsity normalization')
     # parser.add_argument('--scale', '-s', type=float, default=0.001, help='scale sparse rate')

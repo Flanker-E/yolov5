@@ -788,6 +788,7 @@ if __name__ == '__main__':
     print("=" * 150)
     print("Test before prune:")
     if opt.task in ('train', 'val', 'test'):  # run normally
+        opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok ))
         test(opt.data,
              opt.weights,
              opt.batch_size,
@@ -799,6 +800,7 @@ if __name__ == '__main__':
              opt.augment,
              opt.verbose,
              save_txt=opt.save_txt | opt.save_hybrid,
+             save_dir=opt.save_dir,
              save_hybrid=opt.save_hybrid,
              save_conf=opt.save_conf,
              opt=opt
@@ -816,6 +818,7 @@ if __name__ == '__main__':
                    opt.augment,
                    opt.verbose,
                    save_txt=opt.save_txt | opt.save_hybrid,
+                   save_dir=opt.save_dir,
                    save_hybrid=opt.save_hybrid,
                    save_conf=opt.save_conf,
                    opt=opt

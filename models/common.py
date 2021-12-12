@@ -386,7 +386,7 @@ class DetectMultiBackend(nn.Module):
         # YOLOv5 MultiBackend inference
         b, ch, h, w = im.shape  # batch, channel, height, width
         if self.pt:  # PyTorch
-            y = self.model(im) if self.jit else self.model(im, augment=augment, visualize=visualize)
+            y = self.model(im) if self.jit else self.model(im, augment=augment)
             return y if val else y[0]
         elif self.coreml:  # CoreML *.mlmodel
             im = im.permute(0, 2, 3, 1).cpu().numpy()  # torch BCHW to numpy BHWC shape(1,320,192,3)
